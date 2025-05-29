@@ -3,10 +3,12 @@
 
 //! Provides various high-throughput utilities.
 
+mod lines_bwd;
+mod lines_fwd;
 mod memchr2;
-mod memrchr2;
 mod memset;
 
+pub use lines_bwd::*;
+pub use lines_fwd::*;
 pub use memchr2::*;
-pub use memrchr2::*;
 pub use memset::*;

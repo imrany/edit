@@ -7,7 +7,7 @@ use super::Utf8Chars;
 use super::tables::*;
 use crate::document::ReadableDocument;
 use crate::helpers::{CoordType, Point};
-use crate::simd::{memchr2, memrchr2};
+use crate::simd::{lines_bwd, lines_fwd};
 
 /// Stores a position inside a [`ReadableDocument`].
 ///
@@ -515,40 +515,17 @@ impl<'doc> MeasurementConfig<'doc> {
 /// * The line number that was reached.
 pub fn newlines_forward(
     text: &[u8],
-    mut offset: usize,
-    mut line: CoordType,
+    offset: usize,
+    line: CoordType,
     line_stop: CoordType,
 ) -> (usize, CoordType) {
     // Leaving the cursor at the beginning of the current line when the limit
     // is 0 makes this function behave identical to ucd_newlines_backward.
     if line >= line_stop {
-        return newlines_backward(text, offset, line, line_stop);
+        newlines_backward(text, offset, line, line_stop)
+    } else {
+        lines_fwd(text, offset, line, line_stop)
     }
-
-    let len = text.len();
-    offset = offset.min(len);
-
-    loop {
-        // TODO: This code could be optimized by replacing memchr with manual line counting.
-        //
-        // If `line_stop` is very far away, we could accumulate newline counts horizontally
-        // in a AVX2 register (= 32 u8 slots). Then, every 256 bytes we compute the horizontal
-        // sum via `_mm256_sad_epu8` yielding us the newline count in the last block.
-        //
-        // We could also just use `_mm256_sad_epu8` on each fetch as-is.
-        offset = memchr2(b'\n', b'\n', text, offset);
-        if offset >= len {
-            break;
-        }
-
-        offset += 1;
-        line += 1;
-        if line >= line_stop {
-            break;
-        }
-    }
-
-    (offset, line)
 }
 
 /// Seeks backward to the given line start.
@@ -565,23 +542,11 @@ pub fn newlines_forward(
 /// it'll seek backward to the line start.
 pub fn newlines_backward(
     text: &[u8],
-    mut offset: usize,
-    mut line: CoordType,
+    offset: usize,
+    line: CoordType,
     line_stop: CoordType,
 ) -> (usize, CoordType) {
-    offset = offset.min(text.len());
-
-    loop {
-        offset = match memrchr2(b'\n', b'\n', text, offset) {
-            Some(i) => i,
-            None => return (0, line),
-        };
-        if line <= line_stop {
-            // +1: Past the newline, at the start of the current line.
-            return (offset + 1, line);
-        }
-        line -= 1;
-    }
+    lines_bwd(text, offset, line, line_stop)
 }
 
 /// Returns an offset past a newline.
