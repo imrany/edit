@@ -150,7 +150,7 @@ use std::fmt::Write as _;
 use std::{iter, mem, ptr, time};
 
 use crate::arena::{Arena, ArenaString, scratch_arena};
-use crate::buffer::{CursorMovement, RcTextBuffer, TextBuffer, TextBufferCell};
+use crate::buffer::{CursorMovement, RcTextBuffer, TextBuffer, TextBufferCell, WriteMode};
 use crate::cell::*;
 use crate::document::WriteableDocument;
 use crate::framebuffer::{Attributes, Framebuffer, INDEXED_COLORS_COUNT, IndexedColor};
@@ -367,6 +367,12 @@ pub struct Tui {
     /// A counter that is incremented every time the clipboard changes.
     /// Allows for tracking clipboard changes without comparing contents.
     clipboard_generation: u32,
+    /// The editor has a special behavior when you have no selection and press
+    /// Ctrl+C: It copies the current line to the clipboard. Then, when you
+    /// paste it, it inserts the line at *the start* of the current line.
+    /// This effectively prepends the current line with the copied line.
+    /// `clipboard_line_start` is true in that case.
+    clipboard_line_copy: bool,
 
     settling_have: i32,
     settling_want: i32,
@@ -418,6 +424,7 @@ impl Tui {
 
             clipboard: Vec::new(),
             clipboard_generation: 0,
+            clipboard_line_copy: false,
 
             settling_have: 0,
             settling_want: 0,
@@ -500,6 +507,15 @@ impl Tui {
     /// This allows you to track clipboard changes.
     pub fn clipboard_generation(&self) -> u32 {
         self.clipboard_generation
+    }
+
+    /// Sets the clipboard contents.
+    pub fn set_clipboard(&mut self, data: Vec<u8>) {
+        if !data.is_empty() {
+            self.clipboard = data;
+            self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+            self.clipboard_line_copy = false;
+        }
     }
 
     /// Starts a new frame and returns a [`Context`] for it.
@@ -1368,8 +1384,7 @@ impl<'a> Context<'a, '_> {
     /// Sets the clipboard contents.
     pub fn set_clipboard(&mut self, data: Vec<u8>) {
         if !data.is_empty() {
-            self.tui.clipboard = data;
-            self.tui.clipboard_generation = self.tui.clipboard_generation.wrapping_add(1);
+            self.tui.set_clipboard(data);
             self.needs_rerender();
         }
     }
@@ -2037,17 +2052,36 @@ impl<'a> Context<'a, '_> {
 
     /// Creates a text input field.
     /// Returns true if the text contents changed.
-    pub fn editline<'s, 'b: 's>(
-        &'s mut self,
-        classname: &'static str,
-        text: &'b mut dyn WriteableDocument,
-    ) -> bool {
+    pub fn editline(&mut self, classname: &'static str, text: &mut dyn WriteableDocument) -> bool {
         self.textarea_internal(classname, TextBufferPayload::Editline(text))
     }
 
     /// Creates a text area.
     pub fn textarea(&mut self, classname: &'static str, tb: RcTextBuffer) {
         self.textarea_internal(classname, TextBufferPayload::Textarea(tb));
+    }
+
+    pub fn textarea_copy_clipboard(&mut self, tb: &mut TextBuffer, cut: bool) {
+        let line_copy = !tb.has_selection();
+        let selection = tb.extract_selection(cut);
+        self.set_clipboard(selection);
+        self.tui.clipboard_line_copy = line_copy;
+    }
+
+    pub fn textarea_paste_clipboard(&self, tb: &mut TextBuffer) {
+        let clipboard = self.tui.clipboard();
+        if !clipboard.is_empty() {
+            if self.tui.clipboard_line_copy {
+                let pos = tb.cursor_logical_pos();
+                tb.write(clipboard, WriteMode::LinePaste);
+                // TODO: Could move the cursor move into write() itself.
+                // TODO: In fact, we may want to add clipboard generation counters into TextBuffer,
+                //       so that we can give it a paste() method and it handles the if branching for us.
+                tb.cursor_move_to_logical(Point { x: pos.x, y: pos.y + 1 });
+            } else {
+                tb.write(clipboard, WriteMode::Raw);
+            }
+        }
     }
 
     fn textarea_internal(&mut self, classname: &'static str, payload: TextBufferPayload) -> bool {
@@ -2620,15 +2654,12 @@ impl<'a> Context<'a, '_> {
                     _ => return false,
                 },
                 vk::INSERT => match modifiers {
-                    kbmod::SHIFT => {
-                        write = &self.tui.clipboard;
-                        write_raw = true;
-                    }
-                    kbmod::CTRL => self.set_clipboard(tb.extract_selection(false)),
+                    kbmod::SHIFT => self.textarea_paste_clipboard(tb),
+                    kbmod::CTRL => self.textarea_copy_clipboard(tb, false),
                     _ => tb.set_overtype(!tb.is_overtype()),
                 },
                 vk::DELETE => match modifiers {
-                    kbmod::SHIFT => self.set_clipboard(tb.extract_selection(true)),
+                    kbmod::SHIFT => self.textarea_copy_clipboard(tb, true),
                     kbmod::CTRL => tb.delete(CursorMovement::Word, 1),
                     _ => tb.delete(CursorMovement::Grapheme, 1),
                 },
@@ -2657,18 +2688,15 @@ impl<'a> Context<'a, '_> {
                     _ => return false,
                 },
                 vk::X => match modifiers {
-                    kbmod::CTRL => self.set_clipboard(tb.extract_selection(true)),
+                    kbmod::CTRL => self.textarea_copy_clipboard(tb, true),
                     _ => return false,
                 },
                 vk::C => match modifiers {
-                    kbmod::CTRL => self.set_clipboard(tb.extract_selection(false)),
+                    kbmod::CTRL => self.textarea_copy_clipboard(tb, false),
                     _ => return false,
                 },
                 vk::V => match modifiers {
-                    kbmod::CTRL => {
-                        write = &self.tui.clipboard;
-                        write_raw = true;
-                    }
+                    kbmod::CTRL => self.textarea_paste_clipboard(tb),
                     _ => return false,
                 },
                 vk::Y => match modifiers {
@@ -2694,7 +2722,7 @@ impl<'a> Context<'a, '_> {
             write = unicode::strip_newline(&write[..end]);
         }
         if !write.is_empty() {
-            tb.write(write, write_raw);
+            tb.write(write, if write_raw { WriteMode::Raw } else { WriteMode::User });
             change_preferred_column = true;
         }
 

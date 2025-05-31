@@ -72,13 +72,13 @@ fn draw_menu_edit(ctx: &mut Context, state: &mut State) {
         ctx.needs_rerender();
     }
     if ctx.menubar_menu_button(loc(LocId::EditCut), 'T', kbmod::CTRL | vk::X) {
-        ctx.set_clipboard(tb.extract_selection(true));
+        ctx.textarea_copy_clipboard(&mut tb, true);
     }
     if ctx.menubar_menu_button(loc(LocId::EditCopy), 'C', kbmod::CTRL | vk::C) {
-        ctx.set_clipboard(tb.extract_selection(false));
+        ctx.textarea_copy_clipboard(&mut tb, false);
     }
     if ctx.menubar_menu_button(loc(LocId::EditPaste), 'P', kbmod::CTRL | vk::V) {
-        tb.write(ctx.clipboard(), true);
+        ctx.textarea_paste_clipboard(&mut tb);
         ctx.needs_rerender();
     }
     if state.wants_search.kind != StateSearchKind::Disabled {

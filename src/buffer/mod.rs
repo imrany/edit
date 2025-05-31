@@ -154,6 +154,13 @@ pub enum CursorMovement {
     Word,
 }
 
+/// See [`TextBuffer::write()`].
+pub enum WriteMode {
+    User,
+    Raw,
+    LinePaste,
+}
+
 /// The result of a call to [`TextBuffer::render()`].
 pub struct RenderResult {
     /// The maximum visual X position we encountered during rendering.
@@ -1060,7 +1067,7 @@ impl TextBuffer {
         if let (Some(search), Some(..)) = (&mut self.search, &self.selection) {
             let search = search.get_mut();
             if search.selection_generation == self.selection_generation {
-                self.write(replacement.as_bytes(), true);
+                self.write(replacement.as_bytes(), WriteMode::Raw);
             }
         }
 
@@ -1083,7 +1090,7 @@ impl TextBuffer {
             if !self.has_selection() {
                 break;
             }
-            self.write(replacement, true);
+            self.write(replacement, WriteMode::Raw);
             offset = self.cursor.offset;
         }
 
@@ -1784,18 +1791,28 @@ impl TextBuffer {
     ///
     /// If there's a current selection, it will be replaced.
     /// The selection is cleared after the call.
-    pub fn write(&mut self, text: &[u8], raw: bool) {
+    pub fn write(&mut self, text: &[u8], typ: WriteMode) {
         if text.is_empty() {
             return;
         }
 
+        let raw = !matches!(typ, WriteMode::User);
+        let history_type = if raw { HistoryType::Other } else { HistoryType::Write };
         if let Some((beg, end)) = self.selection_range_internal(false) {
-            self.edit_begin(HistoryType::Write, beg);
+            self.edit_begin(history_type, beg);
             self.edit_delete(end);
             self.set_selection(None);
         }
         if self.active_edit_depth <= 0 {
-            self.edit_begin(HistoryType::Write, self.cursor);
+            self.edit_begin(
+                history_type,
+                match typ {
+                    WriteMode::LinePaste => {
+                        self.goto_line_start(self.cursor, self.cursor.logical_pos.y)
+                    }
+                    _ => self.cursor,
+                },
+            );
         }
 
         let mut offset = 0;
@@ -2073,6 +2090,7 @@ impl TextBuffer {
     /// Extracts the contents of the current selection.
     /// May optionally delete it, if requested. This is meant to be used for Ctrl+X.
     pub fn extract_selection(&mut self, delete: bool) -> Vec<u8> {
+        let line_copy = !self.has_selection();
         let Some((beg, end)) = self.selection_range_internal(true) else {
             return Vec::new();
         };
@@ -2085,6 +2103,11 @@ impl TextBuffer {
             self.edit_delete(end);
             self.edit_end();
             self.set_selection(None);
+        }
+
+        // Line copies (= Ctrl+C when there's no selection) always end with a newline.
+        if line_copy && !out.ends_with(b"\n") {
+            out.replace_range(out.len().., if self.newlines_are_crlf { b"\r\n" } else { b"\n" });
         }
 
         out
